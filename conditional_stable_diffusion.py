@@ -56,7 +56,13 @@ class UNetConditioned(torch.nn.Module):
     Expects inputs: (x_t, t, condition) and returns epsilon.
     """
 
-    def __init__(self, base_channels: int = 64, time_emb_dim: int = 128) -> None:
+    def __init__(
+        self,
+        base_channels: int = 64,
+        time_emb_dim: int = 128,
+        in_channels: int = 3,
+        condition_channels: int = 3,
+    ) -> None:
         super().__init__()
         self.time_mlp = torch.nn.Sequential(
             SinusoidalPosEmb(time_emb_dim),
@@ -65,9 +71,7 @@ class UNetConditioned(torch.nn.Module):
             torch.nn.Linear(time_emb_dim, time_emb_dim),
         )
 
-        cond_in = 3
-        x_in = 3
-        self.down1 = UNetBlock(x_in + cond_in, base_channels)
+        self.down1 = UNetBlock(in_channels + condition_channels, base_channels)
         self.down2 = UNetBlock(base_channels, base_channels * 2)
         self.downsample = torch.nn.Conv2d(base_channels * 2, base_channels * 2, 4, stride=2, padding=1)
 
@@ -106,6 +110,7 @@ class ConditionalStableDiffusion(torch.nn.Module):
         timesteps: int = 1000,
         beta_start: float = 1e-4,
         beta_end: float = 0.02,
+        schedule: str = "linear",
         device: Optional[torch.device] = None,
     ) -> None:
         """
@@ -114,13 +119,14 @@ class ConditionalStableDiffusion(torch.nn.Module):
             timesteps: number of diffusion steps T.
             beta_start: starting beta for linear noise schedule.
             beta_end: ending beta for linear noise schedule.
+            schedule: beta schedule type ["linear", "cosine"].
             device: optional device to place buffers on.
         """
         super().__init__()
         self.denoise_model = denoise_model
         self.timesteps = timesteps
 
-        betas = torch.linspace(beta_start, beta_end, timesteps, device=device)
+        betas = self._make_beta_schedule(timesteps, beta_start, beta_end, schedule, device)
         alphas = 1.0 - betas
         alpha_bar = torch.cumprod(alphas, dim=0)
 
@@ -128,14 +134,35 @@ class ConditionalStableDiffusion(torch.nn.Module):
         self.register_buffer("alphas", alphas)
         self.register_buffer("alpha_bar", alpha_bar)
 
+    @staticmethod
+    def _make_beta_schedule(
+        timesteps: int, beta_start: float, beta_end: float, schedule: str, device: Optional[torch.device]
+    ) -> torch.Tensor:
+        if schedule == "linear":
+            return torch.linspace(beta_start, beta_end, timesteps, device=device)
+        if schedule == "cosine":
+            s = 0.008
+            steps = torch.arange(timesteps + 1, device=device, dtype=torch.float)
+            alphas_cumprod = torch.cos(((steps / timesteps) + s) / (1 + s) * torch.pi * 0.5) ** 2
+            alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
+            betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
+            return torch.clamp(betas, 0.0001, 0.9999)
+        raise ValueError(f"Unknown schedule {schedule}")
+
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "ConditionalStableDiffusion":
-        denoise = UNetConditioned(base_channels=args.base_channels, time_emb_dim=args.time_emb_dim)
+        denoise = UNetConditioned(
+            base_channels=args.base_channels,
+            time_emb_dim=args.time_emb_dim,
+            in_channels=args.input_channels,
+            condition_channels=args.condition_channels,
+        )
         return cls(
             denoise_model=denoise,
             timesteps=args.timesteps,
             beta_start=args.beta_start,
             beta_end=args.beta_end,
+            schedule=args.schedule,
             device=torch.device(args.device),
         )
 
@@ -232,8 +259,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--timesteps", type=int, default=1000, help="Number of diffusion steps (T).")
     parser.add_argument("--beta_start", type=float, default=1e-4, help="Linear beta schedule start.")
     parser.add_argument("--beta_end", type=float, default=0.02, help="Linear beta schedule end.")
+    parser.add_argument("--schedule", type=str, default="linear", choices=["linear", "cosine"], help="Beta schedule.")
     parser.add_argument("--base_channels", type=int, default=64, help="Base channels for UNet.")
     parser.add_argument("--time_emb_dim", type=int, default=128, help="Time embedding dimension.")
+    parser.add_argument("--input_channels", type=int, default=3, help="Input channels for x_t.")
+    parser.add_argument("--condition_channels", type=int, default=3, help="Channels for condition image.")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device.")
     parser.add_argument("--guidance_scale", type=float, default=1.0, help="Guidance scale during reverse denoising.")
     return parser.parse_args()
