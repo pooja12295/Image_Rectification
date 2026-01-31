@@ -94,6 +94,14 @@ def run_inference(input_dir: Path, output_dir: Path, model_dir: Path, save_recti
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     model_en, model_de, model_class = load_models(model_dir, device)
 
+    if not input_dir.exists():
+        print(f"Input directory not found: {input_dir}")
+        print("Create the directory and add images, or pass --input_dir to point to an existing folder.")
+        return
+    if not input_dir.is_dir():
+        print(f"Input path is not a directory: {input_dir}")
+        return
+
     output_dir.mkdir(parents=True, exist_ok=True)
     rectified_dir = output_dir / 'rectified'
     if save_rectified:
@@ -108,8 +116,14 @@ def run_inference(input_dir: Path, output_dir: Path, model_dir: Path, save_recti
         print(f"No images found in {input_dir}")
         return
 
+    total = len(image_paths)
+    print(f"Found {total} image(s) in {input_dir}")
+    print(f"Outputs will be written to {output_dir}")
+
+    rectified_files = []
+
     with torch.no_grad():
-        for img_path in image_paths:
+        for idx, img_path in enumerate(image_paths, start=1):
             img = io.imread(str(img_path))
             disimgs = transform(img).unsqueeze(0).to(device)
 
@@ -133,9 +147,15 @@ def run_inference(input_dir: Path, output_dir: Path, model_dir: Path, save_recti
                 rectified = rectify_image(disimgs, flow_output)
                 save_img_path = rectified_dir / f"{img_path.stem}_rectified.png"
                 io.imsave(str(save_img_path), rectified)
-                print(f"Processed {img_path.name} -> {save_mat_path.name}, {save_img_path.name} | predicted: {predicted_label}")
+                rectified_files.append(save_img_path)
+                print(f"[{idx}/{total}] Processed {img_path.name} -> {save_mat_path.name}, {save_img_path.name} | predicted: {predicted_label}")
             else:
-                print(f"Processed {img_path.name} -> {save_mat_path.name} | predicted: {predicted_label}")
+                print(f"[{idx}/{total}] Processed {img_path.name} -> {save_mat_path.name} | predicted: {predicted_label}")
+
+    if save_rectified and rectified_files:
+        print("Rectified files:")
+        for path in rectified_files:
+            print(f" - {path}")
 
 
 def parse_args():
